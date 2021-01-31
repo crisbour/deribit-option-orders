@@ -7,12 +7,16 @@ import time
 import logging
 
 class Instruments:
-    ''' Instruments object from public/get_instruments
-        @params: time_interval = The instruments are refreshed every time_interval seconds
-    '''
+    ''' Instruments object from public/get_instruments '''
     _fields = ['instrument_name', 'expiration_timestamp', 'strike', 'option_type']
 
     def __init__(self, time_interval = 86400):
+        '''
+        Parameters
+        ----------
+        time_interval : int, optional
+            Interval of time between refreshing instruments
+        '''
         self.refresh_interval = time_interval
         self.instruments = []
         self.unique_expiry_time = []
@@ -49,6 +53,12 @@ class Instruments:
             await asyncio.sleep(self.refresh_interval)
 
     def extract(self, response):
+        ''' Extract data about instruments from json message. 
+            The message needs to be converted to python dictionary first with json.loads(msg).
+            Parameters
+            ----------
+            response: str - Message
+        '''
         logging.info('Extract and sort querried instruments')
         local_instruments = []
         local_unique_expiry_time = []
@@ -69,11 +79,18 @@ class Instruments:
         # Unblock semaphore
 
     def get_instruments(self, expirytime, strike_price, type):
+        ''' Return the instruments that match best with the given parameters.
+            Parameters
+            ----------
+            expirytime:     int
+            strike_price:   float
+            type:           str ('put'/'call')
+        '''
         logging.info('Looking for instrument to match (expirytime, strike_price, type)=({},{},{})'.format(expirytime, strike_price, type))
 
         # Verify expirytime is valid
         assert expirytime > int(time.time()*1000), "Expirytime passed {} miliseconds ago".format(expirytime-int(time.time()*1000))
-
+        
         # Find instruments with nearest expiry time
         distance = lambda a, b: (a - b) if (a >= b) else float('inf')
         expiration_timestamp = min(self.unique_expiry_time, key = lambda x: distance(x, expirytime))
