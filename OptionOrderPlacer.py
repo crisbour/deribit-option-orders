@@ -55,47 +55,15 @@ class Instruments:
             logging.info('Requesting public/get_instruments for {}')
             response = self.client_websocket.feed_instruments(currency)
 
-            # Lock thread
+            # Lock access to variables
             self._lock.acquire()
             # Process received message and store values of interest
             self.extract(response)
             logging.info('Successfully updated list of instruments')
-
+            # Unlock access
             self._lock.release()
             
             time.sleep(self.refresh_interval)
-        # asyncio.run(self._feed(currency))
-
-    async def _feed(self, currency):
-        assert currency in ["ETH", "BTC"]
-        # Construct json message needed for the querry
-        msg = \
-        {
-        "jsonrpc" : "2.0",
-        "id" : 1,
-        "method" : "public/get_instruments",
-        "params" : {
-            "currency" : currency,
-            "kind" : "option",
-            "expired" : False
-            }
-        }
-        # websocket querry for get_instruments
-        while True:
-            
-            logging.info('Requesting public/get_instruments for {}')
-            async with websockets.connect('wss://www.deribit.com/ws/api/v2') as websocket:
-                await websocket.send(json.dumps(msg))
-                if websocket.open:
-                    response = await websocket.recv()
-
-            # Process received message and store values of interest
-            self.extract(json.loads(response))
-            logging.info('Successfully updated list of instruments')
-
-            self._lock.release()
-            # Wait a day (or user defined interval) to refresh interval
-            await asyncio.sleep(self.refresh_interval)
 
     def extract(self, response):
         ''' Extract data about instruments from json message. 
@@ -114,23 +82,26 @@ class Instruments:
 
         # Sort the instruments data to ease looking for the right instrument
         local_instruments.sort(key = lambda x : (x[self._fields.index('expiration_timestamp')], x[self._fields.index('strike')]))
-        # for instr in local_instruments:
-        #     print(instr)
         
         # Lock access to object until writing the new data
         self.instruments = local_instruments
         self.unique_expiry_time = local_unique_expiry_time
-        print('Unique expiration timestamps: {}'.format(self.unique_expiry_time))
+        print('Unique expiration timestamps: {}\n'.format(self.unique_expiry_time))
         # Release the lock
 
 
-    def get_instruments(self, expirytime, strike_price, type):
+    def get_instrument(self, expirytime, strike_price, type):
         ''' Return the instruments that match best with the given parameters.
+
             Parameters
             ----------
-            expirytime:     int
-            strike_price:   float
-            type:           str ('put'/'call')
+            expirytime:     int             
+            strike_price:   float            
+            type:           str ('put'/'call')          
+
+            Returns
+            -------
+            (instrument_name, expiration_timestamp, strike)
         '''
         # Wait in case instruments have not been loaded for the first time yet
         while len(self.instruments) == 0:
@@ -171,8 +142,11 @@ class DeribitExhchangeVersion:
     def get(self):
         return self.exchange_version
 
-''' ---- Create client signature for secure authentification ---- '''
+
 class ClientSignature:
+    ''' ---- Create client signature for secure authentification ---- 
+        This way you don't need to make clienSecret visible in communicating
+        with the api server.'''
     def __init__(self, clientId, clientSecret, data=''):
         self.clientId = clientId
         tstamp = round(datetime.now().timestamp() * 1000)
@@ -186,9 +160,13 @@ class ClientSignature:
     def get_client_signature(self):
         return self.client_signature
 
-''' ---- Schedule websocket authentification, querries and information receiving ---- '''
+
+
 class ClientWebsocket:
-    ''' Client Websocket to interact with the server, pulling and pushing json messages'''
+    ''' Client Websocket to interact with the server, pulling and pushing json messages.
+        An instance of this class creates a thread in whichan asyncio websocket is opened. 
+        Asyncrhonous to it, messages are queued and dequed to get data to right member 
+        or schedule new transmissions.'''
 
     # Configurations constants
     REFRSH_TOKEN   =   0x01     # Refresh token flgas
@@ -196,6 +174,7 @@ class ClientWebsocket:
     HEART_REQ       =   0x04    # Heartbeat requested flag
     HEART_SET       =   0x08    # Heartbeat set flag
     class Flags:
+        ''' Flags to keep track of the connection status.'''
         def __init__(self):
             self.flags = 0x00
         def check(self, mask):
@@ -210,6 +189,7 @@ class ClientWebsocket:
             client_signature:   ClientSignature
             exchange_version:   str = 'testnet'/'live'
         '''
+        self.exchange_version = DeribitExhchangeVersion(exchange_version).get()
         self.scope = "account:read_write trade:read_write wallet:read_write block_trade:read_write custody:read_write"
         self.msg_out = queue.Queue()
         self.instruments = queue.Queue()
@@ -221,7 +201,9 @@ class ClientWebsocket:
         self.refersh_token = ''
         self.client_auth(client_signature)
         self.heartbeat()
-        self._lock = threading.Lock()
+        
+        # Create thread for transmission and reception
+        # self._lock = threading.Lock()
         self.send_read_thread = self.websocket_worker()
     
     def __del__(self):
@@ -236,7 +218,7 @@ class ClientWebsocket:
         msg_in = asyncio.Queue()
         self.connection_state = asyncio.Queue()
         self.id2queue[1] = self.connection_state
-
+        # Concurancy for websocket, attributing incoming data and maintaining connection health
         await asyncio.gather(self._socket(msg_in),self._receive(msg_in), self._maintain_connection())
 
 
@@ -263,20 +245,20 @@ class ClientWebsocket:
 
     async def _socket(self, msg_in):
         async def send(websocket):
-            if(not self.msg_out.empty()):
+            if not self.msg_out.empty():
                 msg = self.msg_out.get()
                 logging.debug('Sending')
                 await websocket.send(msg)
                 logging.debug(msg)
         async def receive(websocket):
-            if(websocket.open):
+            if websocket.open:
                 response = await websocket.recv()
                 if response:
                     logging.debug('Receiving')
                     await msg_in.put(response)
                     logging.debug(response)
 
-        async with websockets.connect('wss://test.deribit.com/ws/api/v2') as websocket:
+        async with websockets.connect(self.exchange_version) as websocket:
             while True:
                 await asyncio.gather(send(websocket),receive(websocket))
                 
@@ -321,7 +303,7 @@ class ClientWebsocket:
                 logging.info('Heartbeat Successfully Initiated ')
 
             # Respond to a test request
-            if 'params' in msg.keys() and msg['params']['type'] == 'test_request':                                    # noqa: E501
+            if 'params' in msg.keys() and msg['params']['type'] == 'test_request':  
                 ws_data = {
                     "jsonrpc": "2.0",
                     "id": 1,
@@ -428,20 +410,24 @@ class ClientWebsocket:
 
 class OptionsOrder:
     orders_id = []
-    def __init__(self, instruments=None):
+    def __init__(self, client_websocket, instruments=None):
+        self.client_websocket = client_websocket
         if not instruments:
-            self.instruments = Instruments()
+            self.instruments = Instruments(client_websocket)
         else:
             self.instruments = instruments
-    def get_instruments(self):
-        return self.instruments.get_instruments()
+
+    def get_instrument(self):
+        return self.instruments.get_instrument()
     
-    # def place_orders(instrument_name, amount, side):
-    #     client.get_orderbook()
-    #     if(side == 'buy'):
-    #         price = best_bid + tick_size
-    #     else:
-    #         price = best_ask - tick_size
+    def place_orders(self, instrument_name, amount, side):
+        msg = self.client_websocket.get_orderbook(instrument_name)
+        print(msg)
+
+        # if(side == 'buy'):
+        #     price = best_bid + tick_size
+        # else:
+        #     price = best_ask - tick_size
 
 
 if __name__ == "__main__":
@@ -452,9 +438,15 @@ if __name__ == "__main__":
 
     client_signature = ClientSignature(Client_Id, Client_Secret)
     client_websocket = ClientWebsocket(client_signature)
-    instruments = Instruments(client_websocket, time_interval=50)
+    instruments = Instruments(client_websocket)
+    option_order = OptionsOrder(client_websocket, instruments=instruments)
+
 
     time.sleep(1)
+    instrument_name,_,_ = instruments.get_instrument(1612127481*1000, 1364.7, 'put')
+    while True:
+        option_order.place_orders(instrument_name, 2, 'buy')
+        time.sleep(1)
     # instruments = Instruments(time_interval=50, currency='ETH')
 
     # while True:
