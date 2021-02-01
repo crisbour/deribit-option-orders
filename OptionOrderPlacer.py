@@ -463,24 +463,26 @@ class OptionsOrder:
 
     @threaded
     def loop_orders(self):
-        order_id = self.orders.get()
-        order_querry = self.client_websocket.get_order_state(order_id)
-        order_result = order_querry['result']
-        try:
-            order_state = order_result['order_state']
-            if order_state == 'open':
-                amount = order_result['amount']
-                filled_amount = order_result['filled_amount']
-                direction = order_result['direction']
-                instrument = order_result['instrument_name']
-                logging.info(f'Cancel order {order_id} and place_orders({instrument}, {amount-filled_amount}, {direction})')
-                self.client_websocket.cancel_order(order_id)
-                self.place_orders(instrument, amount - filled_amount, direction)
-            else:
-                logging.info(f'Order {order_id} has state \'{order_state}\'. The order has been removed from orders array.')
-        except:
-            logging.error(f'Order state of {order_id} is not existing or has bad format. Received json message: {order_querry}')
-
+        while True:
+            order_id = self.orders.get()
+            order_querry = self.client_websocket.get_order_state(order_id)
+            order_result = order_querry['result']
+            try:
+                order_state = order_result['order_state']
+                if order_state == 'open':
+                    amount = order_result['amount']
+                    filled_amount = order_result['filled_amount']
+                    direction = order_result['direction']
+                    instrument = order_result['instrument_name']
+                    logging.info(f'Cancel order {order_id} and place_orders({instrument}, {amount-filled_amount}, {direction})')
+                    self.client_websocket.cancel_order(order_id)
+                    self.place_orders(instrument, amount - filled_amount, direction)
+                else:
+                    logging.info(f'Order {order_id} has state \'{order_state}\'. The order has been removed from orders array.')
+            except:
+                logging.error(f'Order state of {order_id} is not existing or has bad format. Received json message: {order_querry}')
+            
+            time.sleep(0.001)
 
     
 
@@ -498,5 +500,4 @@ if __name__ == "__main__":
     instrument_name,_,_ = option_order.get_instrument(round(1000*(time.time()+200)), 1333.5, 'call')
     while True:
         option_order.place_orders(instrument_name, 1, 'buy')
-        option_order.loop_orders()
         time.sleep(50)
