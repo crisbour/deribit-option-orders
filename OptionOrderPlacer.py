@@ -193,7 +193,8 @@ class ClientWebsocket:
         self.orderbook = queue.Queue()
         self.order_state = queue.Queue()
         self.order_reply = queue.Queue()
-        self.id2queue = {1: None, 2: self.orderbook, 3: self.order_reply, 4: self.order_state, 5: self.instruments}
+        self.order_cancel = queue.Queue()
+        self.id2queue = {1: None, 2: self.instruments, 3: self.orderbook, 4: self.order_reply, 5: self.order_state, 6: self.order_cancel}
         self.flags = self.Flags()
         self.refersh_token = ''
         self.client_auth(client_signature)
@@ -349,7 +350,7 @@ class ClientWebsocket:
         msg = \
         {
         "jsonrpc" : "2.0",
-        "id" : 5,
+        "id" : 2,
         "method" : "public/get_instruments",
         "params" : {
             "currency" : currency,
@@ -366,7 +367,7 @@ class ClientWebsocket:
         msg = \
         {
         "jsonrpc" : "2.0",
-        "id" : 2,
+        "id" : 3,
         "method" : "public/get_book_summary_by_instrument",
         "params" : {
             "instrument_name" : instrument_name
@@ -382,7 +383,7 @@ class ClientWebsocket:
         msg = \
         {
         "jsonrpc" : "2.0",
-        "id" : 3,
+        "id" : 4,
         "method" : "private/"+side,
         "params" : {
             "instrument_name" : instrument_name,
@@ -401,7 +402,7 @@ class ClientWebsocket:
         msg = \
         {
         "jsonrpc" : "2.0",
-        "id" : 4,
+        "id" : 5,
         "method" : "private/get_order_state",
         "params" : {
             "order_id" : order_id
@@ -413,21 +414,35 @@ class ClientWebsocket:
         return self.order_state.get()
     
     def cancel_order(self, order_id):
-        pass
+        msg = \
+        {
+        "jsonrpc" : "2.0",
+        "id" : 6,
+        "method" : "private/cancel",
+        "params" : {
+            "order_id" : order_id
+            }
+        }
+        self.msg_out.put(json.dumps(msg))
+        while self.order_cancel.empty():
+            pass
+        return self.order_cancel.get()
 
 
 class OptionsOrder:
     ''' Class that contains functionalities for placing option orders.'''
 
-    def __init__(self, client_websocket, instruments = None, repeat_interval = 50):
+    def __init__(self, client_websocket, instruments = None, delay = 50):
         ''' Initialize object that handles the orders.
             Parameters
             ----------
             clien_websocket:    ClientWebsocket
             instruments:        Instruments
-            repeat_interval:    int (miliseconds)
+            delay:              int (miliseconds)
+                Delay between orders when looping through all orders_id,
+                to cancel and place new ones
         '''
-
+        self.delay = delay / 1000   # Store delay in seconds for loop orders
         self.client_websocket = client_websocket
         if not instruments:
             self.instruments = Instruments(client_websocket)
@@ -442,11 +457,21 @@ class OptionsOrder:
         return self.instruments.get_instrument(expiry_time, strike, type)
     
     def place_orders(self, instrument_name, amount, side):
+        ''' Place a new order 
+            Parameters
+            ----------
+            instrument_name:    str     (i.e. ETH-2FEB21-1320-C)
+            amount:             float   
+            side:               str     ('buy' or 'sell')
+        '''
+        # Querry the api for public/get_book_summary_by_instrument
         book = self.client_websocket.get_orderbook(instrument_name)
+        # Extract bid_price and ask_price
         best_bid = book['result'][0]['bid_price']
         best_ask = book['result'][0]['ask_price']
-        logging.info(f'Best bid = {best_bid}, Best ask = {best_ask} \n')
+        logging.info(f'Best bid = {best_bid}, Best ask = {best_ask}')
 
+        # Place the order
         try:
             if(side == 'buy'):
                 price = best_bid + self.tick_size
@@ -454,15 +479,20 @@ class OptionsOrder:
                 price = best_ask - self.tick_size
             order_reply = self.client_websocket.place_order(instrument_name, amount, side, price)
             index = order_reply['result']['order']['order_id']
-            self.orders.put(index)
+            self.orders.put(index)          # add order_id to orders
             logging.info(f'{side.capitalize()} order placed for instrument {instrument_name}: ' +
                             f'(amount, price, order_id) = ({amount}, {price}, {index})')
         except:
-            price_type = 'ask_price' if best_bid else ( 'best_price' if best_ask else 'best_price/ask_price')
-            logging.info(f"No {price_type} available. Couldn't place {side} order for instrument {instrument_name}")
+            price_type = 'ask_price' if best_bid else \
+                         ( 'bid_price' if best_ask else 'bid_price/ask_price')
+            logging.info(f'No {price_type} available. ' + 
+                        'Couldn\'t place {side} order for instrument {instrument_name}')
 
     @threaded
     def loop_orders(self):
+        ''' This loops through all existing orders continously,
+            backpressuring with a delay between each order.
+        '''
         while True:
             order_id = self.orders.get()
             order_querry = self.client_websocket.get_order_state(order_id)
@@ -470,19 +500,20 @@ class OptionsOrder:
             try:
                 order_state = order_result['order_state']
                 if order_state == 'open':
+                    order_at_cancel = self.client_websocket.cancel_order(order_id)
+                    filled_amount = order_at_cancel['result']['filled_amount']
                     amount = order_result['amount']
-                    filled_amount = order_result['filled_amount']
                     direction = order_result['direction']
                     instrument = order_result['instrument_name']
                     logging.info(f'Cancel order {order_id} and place_orders({instrument}, {amount-filled_amount}, {direction})')
-                    self.client_websocket.cancel_order(order_id)
                     self.place_orders(instrument, amount - filled_amount, direction)
                 else:
                     logging.info(f'Order {order_id} has state \'{order_state}\'. The order has been removed from orders array.')
             except:
-                logging.error(f'Order state of {order_id} is not existing or has bad format. Received json message: {order_querry}')
+                logging.error(f'Order state of {order_id} is not existing or has bad format. ' + 
+                                'Received json message: {order_querry}')
             
-            time.sleep(0.001)
+            time.sleep(self.delay)
 
     
 
@@ -497,7 +528,7 @@ if __name__ == "__main__":
     instruments = Instruments(client_websocket)
     option_order = OptionsOrder(client_websocket, instruments=instruments)
 
-    instrument_name,_,_ = option_order.get_instrument(round(1000*(time.time()+200)), 1333.5, 'call')
+    instrument_name,_,_ = option_order.get_instrument(round(1000*(time.time()+200)), 1319.3, 'call')
     while True:
-        option_order.place_orders(instrument_name, 1, 'buy')
+        option_order.place_orders(instrument_name, 1, 'sell')
         time.sleep(50)
