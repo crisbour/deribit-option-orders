@@ -12,7 +12,6 @@ import secrets
 import bisect
 
 ''' ---- Wrapper for creating a new thread for a functionn ----'''
-
 def threaded(fn):
     def wrapper(*args, **kwargs):
         thread = threading.Thread(target=fn, args=args, kwargs=kwargs)
@@ -22,7 +21,6 @@ def threaded(fn):
 
 
 ''' ---- Object of available instruments ---- '''
-
 class Instruments:
     ''' Instruments object from public/get_instruments '''
     _fields = ['instrument_name', 'expiration_timestamp', 'strike', 'option_type']
@@ -55,13 +53,10 @@ class Instruments:
             logging.info('Requesting public/get_instruments for {}')
             response = self.client_websocket.feed_instruments(currency)
 
-            # Lock access to variables
-            self._lock.acquire()
+            
             # Process received message and store values of interest
             self.extract(response)
             logging.info('Successfully updated list of instruments')
-            # Unlock access
-            self._lock.release()
             
             time.sleep(self.refresh_interval)
 
@@ -84,10 +79,12 @@ class Instruments:
         local_instruments.sort(key = lambda x : (x[self._fields.index('expiration_timestamp')], x[self._fields.index('strike')]))
         
         # Lock access to object until writing the new data
+        self._lock.acquire()
         self.instruments = local_instruments
         self.unique_expiry_time = local_unique_expiry_time
-        print('Unique expiration timestamps: {}\n'.format(self.unique_expiry_time))
         # Release the lock
+        self._lock.release()
+        print('Unique expiration timestamps: {}\n'.format(self.unique_expiry_time))
 
 
     def get_instrument(self, expirytime, strike_price, type):
@@ -95,9 +92,9 @@ class Instruments:
 
             Parameters
             ----------
-            expirytime:     int             
+            expirytime:     int     (miliseconds)            
             strike_price:   float            
-            type:           str ('put'/'call')          
+            type:           str     ('put'/'call')          
 
             Returns
             -------
@@ -195,8 +192,8 @@ class ClientWebsocket:
         self.instruments = queue.Queue()
         self.orderbook = queue.Queue()
         self.order_state = queue.Queue()
-        self.buy_reply = queue.Queue()
-        self.id2queue = {1: None, 2: self.orderbook, 3: self.buy_reply, 4: self.order_state, 5: self.instruments}
+        self.order_reply = queue.Queue()
+        self.id2queue = {1: None, 2: self.orderbook, 3: self.order_reply, 4: self.order_state, 5: self.instruments}
         self.flags = self.Flags()
         self.refersh_token = ''
         self.client_auth(client_signature)
@@ -245,22 +242,24 @@ class ClientWebsocket:
 
     async def _socket(self, msg_in):
         async def send(websocket):
-            if not self.msg_out.empty():
-                msg = self.msg_out.get()
-                logging.debug('Sending')
-                await websocket.send(msg)
-                logging.debug(msg)
+            while True:
+                if not self.msg_out.empty():
+                    msg = self.msg_out.get()
+                    logging.debug('Sending: '+ msg)
+                    await websocket.send(msg)
+                else:
+                    await asyncio.sleep(0.005)       # Backpressure to give receiving opportunity
+
         async def receive(websocket):
-            if websocket.open:
-                response = await websocket.recv()
-                if response:
-                    logging.debug('Receiving')
+            while True:
+                if websocket.open:
+                    response = await websocket.recv()
+                    logging.debug('Receiving: '+ response)
                     await msg_in.put(response)
-                    logging.debug(response)
 
         async with websockets.connect(self.exchange_version) as websocket:
-            while True:
-                await asyncio.gather(send(websocket),receive(websocket))
+            logging.debug("Socket heartbeat")
+            await asyncio.gather(send(websocket),receive(websocket))
                 
     async def _maintain_connection(self):
         while True:
@@ -312,6 +311,7 @@ class ClientWebsocket:
                     }
                 }
                 self.msg_out.put(json.dumps(ws_data))
+            
 
 
     def client_auth(self, client_signature):
@@ -373,25 +373,32 @@ class ClientWebsocket:
         }
         }
         self.msg_out.put(json.dumps(msg))
+        logging.debug("Querry for get_book_summary_by_instrument placed")
         while self.orderbook.empty():
             pass
         return self.orderbook.get()
     
-    def place_order(self, instrument_name, amount):
+    def place_order(self, instrument_name, amount, side, price):
         msg = \
         {
         "jsonrpc" : "2.0",
         "id" : 3,
-        "method" : "private/buy",
+        "method" : "private/"+side,
         "params" : {
             "instrument_name" : instrument_name,
-            "amount" : amount
+            "amount" : amount,
+            "type" : "limit",
+            "price": price,
+            "time_in_force": "good_til_cancelled"
             }
         }
         self.msg_out.put(json.dumps(msg))
-        while self.buy_reply.empty():
+        while self.order_reply.empty():
             pass
-        return self.buy_reply.get()
+        return self.order_reply.get()
+    
+    def cancel_order(self, order_id):
+        pass
 
     def get_order_state(self, order_id):
         msg = \
@@ -409,29 +416,45 @@ class ClientWebsocket:
 
 
 class OptionsOrder:
-    orders_id = []
     def __init__(self, client_websocket, instruments=None):
         self.client_websocket = client_websocket
         if not instruments:
             self.instruments = Instruments(client_websocket)
         else:
             self.instruments = instruments
+        self.tick_size = 0.0005
+        self.orders_id = queue.Queue()
+        
 
-    def get_instrument(self):
-        return self.instruments.get_instrument()
+    def get_instrument(self,expiry_time, strike, type):
+        return self.instruments.get_instrument(expiry_time, strike, type)
     
     def place_orders(self, instrument_name, amount, side):
-        msg = self.client_websocket.get_orderbook(instrument_name)
-        print(msg)
+        book = self.client_websocket.get_orderbook(instrument_name)
+        best_bid = book['result'][0]['bid_price']
+        best_ask = book['result'][0]['ask_price']
+        logging.info(f'Best bid = {best_bid}, Best ask = {best_ask} \n')
 
-        # if(side == 'buy'):
-        #     price = best_bid + tick_size
-        # else:
-        #     price = best_ask - tick_size
+        try:
+            if(side == 'buy'):
+                price = best_bid + self.tick_size
+            else:
+                price = best_ask - self.tick_size
+            order_reply = self.client_websocket.place_order(instrument_name, amount, side, price)
+            index = order_reply['result']['order_id']
+            self.orders_id.put(index)
+            logging.info(f'{side.capitalize()} order placed for instrument {instrument_name}: (amount, price, order_id)=({amount},{price},{index})')
+        except:
+            price_type = 'ask_price' if best_bid else ( 'best_price' if best_ask else 'best_price/ask_price')
+            logging.info(f"No {price_type} available. Couldn't place {side} order for instrument {instrument_name}")
 
+    def loop_orders(self):
+        pass
+
+    
 
 if __name__ == "__main__":
-    logging.basicConfig(format="%(asctime)s: %(message)s", level=logging.INFO,
+    logging.basicConfig(format="%(asctime)s: %(message).700s", level=logging.INFO,
                             datefmt="%H:%M:%S")
 
     from UserCredentials import Client_Id, Client_Secret
@@ -441,14 +464,7 @@ if __name__ == "__main__":
     instruments = Instruments(client_websocket)
     option_order = OptionsOrder(client_websocket, instruments=instruments)
 
-
-    time.sleep(1)
-    instrument_name,_,_ = instruments.get_instrument(1612127481*1000, 1364.7, 'put')
+    instrument_name,_,_ = option_order.get_instrument(round(1000*(time.time()+200)), 1333.5, 'call')
     while True:
-        option_order.place_orders(instrument_name, 2, 'buy')
-        time.sleep(1)
-    # instruments = Instruments(time_interval=50, currency='ETH')
-
-    # while True:
-    #     print(instruments.get_instruments(int(time.time()*1000+10000000), 1300, 'put'))
-    #     time.sleep(20)
+        option_order.place_orders(instrument_name, 1, 'buy')
+        time.sleep(50)
