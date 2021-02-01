@@ -4,7 +4,7 @@ Framework to interact with Deribit API and place option orders.
 
 ## Functionalities
 
-The code contains 3 classes that the user need to interact with:
+The code contains 4 classes that the user need to interact with:
 
 	- ClientSignature
 	- ClientWebsocket
