@@ -474,12 +474,11 @@ class OptionsOrder:
 
         # Place the order
         try:
-            logging.info(f'Current price = {current_price}.')
             if(side == 'buy'):
-                price = current_price if current_price!=None else best_bid
+                price = current_price if current_price else best_bid
                 price = price + self.tick_size
             else:
-                price = current_price if current_price!=None else best_ask
+                price = current_price if current_price else best_ask
                 price = price - self.tick_size
             order_reply = self.client_websocket.place_order(instrument_name, amount, side, price)
             index = order_reply['result']['order']['order_id']
