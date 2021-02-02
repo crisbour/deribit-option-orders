@@ -4,7 +4,7 @@ Framework to interact with Deribit API and place option orders.
 
 ## Functionalities
 
-The code contains 3 classes that the user need to interact with:
+The code contains 4 classes that the user need to interact with:
 
 	- ClientSignature
 	- ClientWebsocket
@@ -64,9 +64,9 @@ OptionsOrder(client_websocket, instruments=instruments, delay=50)
 OptionsOrder(client_websocket)
 ```
 
-If no *Instrument*s object is passed to OptionsOrder, then and *Instruments* instance will be created within this class init. The parameter *delay* indicates in miliseconds how much time passes orders when looping them.
+If no *Instrument*s object is passed to OptionsOrder, then an *Instruments* instance will be created within this class init. The parameter *delay* indicates in miliseconds how much time passes between orders when looping them.
 
-OptionOrder contain all functionalities requested:
+OptionsOrder contain all functionalities requested:
 
 - get_instruments(expirytime, strike_price, type)
 - place_orders(instrument_name , amount , side)
