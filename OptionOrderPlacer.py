@@ -456,13 +456,14 @@ class OptionsOrder:
     def get_instrument(self,expiry_time, strike, type):
         return self.instruments.get_instrument(expiry_time, strike, type)
     
-    def place_orders(self, instrument_name, amount, side):
+    def place_orders(self, instrument_name, amount, side, current_price=None):
         ''' Place a new order 
             Parameters
             ----------
-            instrument_name:    str     (i.e. ETH-2FEB21-1320-C)
+            instrument_name:    str             (i.e. ETH-2FEB21-1320-C)
             amount:             float   
-            side:               str     ('buy' or 'sell')
+            side:               str             ('buy' or 'sell')
+            current_price:      float, optional (for replacing orders)
         '''
         # Querry the api for public/get_book_summary_by_instrument
         book = self.client_websocket.get_orderbook(instrument_name)
@@ -473,20 +474,23 @@ class OptionsOrder:
 
         # Place the order
         try:
+            logging.info(f'Current price = {current_price}.')
             if(side == 'buy'):
-                price = best_bid + self.tick_size
+                price = current_price if current_price!=None else best_bid
+                price = price + self.tick_size
             else:
-                price = best_ask - self.tick_size
+                price = current_price if current_price!=None else best_ask
+                price = price - self.tick_size
             order_reply = self.client_websocket.place_order(instrument_name, amount, side, price)
             index = order_reply['result']['order']['order_id']
-            self.orders.put(index)          # add order_id to orders
+            self.orders.put(index)          # add order_id to orders)
             logging.info(f'{side.capitalize()} order placed for instrument {instrument_name}: ' +
                             f'(amount, price, order_id) = ({amount}, {price}, {index})')
         except:
             price_type = 'ask_price' if best_bid else \
                          ( 'bid_price' if best_ask else 'bid_price/ask_price')
             logging.info(f'No {price_type} available. ' + 
-                        'Couldn\'t place {side} order for instrument {instrument_name}')
+                        f'Couldn\'t place {side} order for instrument {instrument_name}')
 
     @threaded
     def loop_orders(self):
@@ -505,8 +509,9 @@ class OptionsOrder:
                     amount = order_result['amount']
                     direction = order_result['direction']
                     instrument = order_result['instrument_name']
-                    logging.info(f'Cancel order {order_id} and place_orders({instrument}, {amount-filled_amount}, {direction})')
-                    self.place_orders(instrument, amount - filled_amount, direction)
+                    price = order_result['price']
+                    logging.info(f'Cancel order {order_id} and place_orders({instrument}, {amount-filled_amount}, {direction}, current_price={price})')
+                    self.place_orders(instrument, amount - filled_amount, direction, current_price=price)
                 else:
                     logging.info(f'Order {order_id} has state \'{order_state}\'. The order has been removed from orders array.')
             except:
